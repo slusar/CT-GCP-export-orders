@@ -1,0 +1,20 @@
+{
+  "name": "CT-GCP-export-orders",
+  "version": "0.1.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js $",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google-cloud/logging-winston": "0.11.0",
+    "@google-cloud/storage": "2.5.0",
+    "winston": "3.2.1",
+    "sphere-order-export": "2.2.3",
+    "sphere-node-utils": "^1.0.0",
+    "csv-parser": "^1.11.0"
+  }
+}
