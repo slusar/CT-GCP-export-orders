@@ -15,6 +15,7 @@
     "winston": "3.2.1",
     "sphere-order-export": "2.2.3",
     "sphere-node-utils": "^1.0.0",
+    "sphere-node-sdk": "^2.4.1",
     "csv-parser": "^1.11.0"
   }
 }

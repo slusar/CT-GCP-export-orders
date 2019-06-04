@@ -1,7 +1,12 @@
 const winston = require('winston');
 const {LoggingWinston} = require('@google-cloud/logging-winston')
 const {Storage} = require('@google-cloud/storage');
-const Export = require('sphere-order-export/lib/orderexport')
+const Export = require('sphere-order-export/lib/orderexport');
+const Rest = require('sphere-node-sdk/lib/connect/rest');
+const ChannelService = require('sphere-node-sdk/lib/services/channels');
+const OrderService = require('sphere-node-sdk/lib/services/orders');
+const StatesService = require('sphere-node-sdk/lib/services/states');
+const TaskQueue = require('sphere-node-sdk/lib/task-queue');
 const loggingWinston = new LoggingWinston();
 
 const logger = winston.createLogger({
@@ -15,20 +20,72 @@ const logger = winston.createLogger({
 const csv = require('csv-parser');
 const CHANNEL_KEY = 'OrderXmlFileExport';
 
+//for local node run
+// const CT_PROJECT_KEY = process.env.npm_config_CONFIG_CT_PROJECT_KEY;
+// const CT_CLIENT_ID = process.env.npm_config_CONFIG_CT_CLIENT_ID;
+// const CT_CLIENT_SECRET = process.env.npm_config_CONFIG_CT_CLIENT_SECRET;
+// const CT_CSV_TEMPLATE = process.env.npm_config_CONFIG_CT_CSV_TEMPLATE || '/usr/src/app/template/exported-orders-template.csv';
+// const CT_FILL_ALL_ROWS = process.env.npm_config_CONFIG_CT_FILL_ALL_ROWS || false;
+// const GCS_SERVICE_ACCOUNT_FILE = process.env.npm_config_CONFIG_GCS_SERVICE_ACCOUNT_FILE || '/config/gcs_sa.json';
+// const GCS_TARGET_BUCKET_NAME = process.env.npm_config_CONFIG_GCS_TARGET_BUCKET_NAME;
+// const GCS_TARGET_PATH_NAME = process.env.npm_config_CONFIG_GCS_TARGET_PATH_NAME;
+
+//for docker run
+const CT_PROJECT_KEY = process.env.CONFIG_CT_PROJECT_KEY;
+const CT_CLIENT_ID = process.env.CONFIG_CT_CLIENT_ID;
+const CT_CLIENT_SECRET = process.env.CONFIG_CT_CLIENT_SECRET;
+const CT_CSV_TEMPLATE = process.env.CONFIG_CT_CSV_TEMPLATE || '/usr/src/app/template/exported-orders-template.csv';
+const CT_FILL_ALL_ROWS = process.env.CONFIG_CT_FILL_ALL_ROWS || false;
+const GCS_SERVICE_ACCOUNT_FILE = process.env.CONFIG_GCS_SERVICE_ACCOUNT_FILE || '/config/gcs_sa.json';
+const GCS_TARGET_BUCKET_NAME = process.env.CONFIG_GCS_TARGET_BUCKET_NAME;
+const GCS_TARGET_PATH_NAME = process.env.CONFIG_GCS_TARGET_PATH_NAME;
+//
+
+const configJson = {
+    project_key: CT_PROJECT_KEY,
+    client_id: CT_CLIENT_ID,
+    client_secret: CT_CLIENT_SECRET
+}
+const statsJson = {
+    includeHeaders: false,
+    maskSensitiveHeaderData: false
+}
+
 const options = {
     client: {
-        config: {
-            project_key: process.env.CONFIG_CT_PROJECT_KEY,
-            client_id: process.env.CONFIG_CT_CLIENT_ID,
-            client_secret: process.env.CONFIG_CT_CLIENT_SECRET
-        }
+        config: configJson
     },
     export: {
         exportType: 'csv',
         exportUnsyncedOnly: true,
-        csvTemplate: process.env.CONFIG_CT_CSV_TEMPLATE,
-        fillAllRows: process.env.CONFIG_CT_FILL_ALL_ROWS || false,
+        csvTemplate: CT_CSV_TEMPLATE,
+        fillAllRows: CT_FILL_ALL_ROWS,
     }
+}
+
+const rest = new Rest({
+    config: configJson
+});
+
+
+function getChannelService() {
+
+    return new ChannelService({
+        _rest: rest, _task: new TaskQueue, _stats: statsJson
+    });
+}
+
+function getStatesService() {
+
+    return new StatesService({
+        _rest: rest, _task: new TaskQueue, _stats: statsJson
+    });
+}
+
+function getOrderService() {
+    return new OrderService({
+        _rest: rest, _task: new TaskQueue, _stats: statsJson
+    });
 }
 
 var main = (async function () {
@@ -36,7 +93,7 @@ var main = (async function () {
 
     logConfiguration(logger);
 
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = process.env.CONFIG_GCS_SERVICE_ACCOUNT_FILE;
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = GCS_SERVICE_ACCOUNT_FILE;
 
     let filename = getTargetFileName();
 
@@ -52,8 +109,8 @@ var main = (async function () {
                     return Promise.resolve();
                 }
                 writeFileToBucket(data, getTargetFileNameWithLocation(filename)).then(function () {
-                    logger.info("file was written to bucket " + process.env.CONFIG_GCS_TARGET_BUCKET_NAME);
-                    return resolve(syncInfo(filename));
+                    logger.info("file was written to bucket " + GCS_TARGET_BUCKET_NAME);
+                    return resolve(processOrderUpdate(filename));
                 }).catch(function (error) {
                     logger.error(error);
                     reject(error);
@@ -76,52 +133,155 @@ var main = (async function () {
     }
 
     function getTargetFileNameWithLocation(targetFilename) {
-        let filename = process.env.CONFIG_GCS_TARGET_PATH_NAME + '/' + targetFilename;
+        let filename = GCS_TARGET_PATH_NAME + '/' + targetFilename;
         return filename;
     }
 
-    function syncInfo(filename) {
-
-        function getJsonFileName() {
-            let ordersFileJSON;
-            if (process.env.CONFIG_CT_FILE_WITH_TIMESTAMP) {
-                ordersFileJSON = "orders_sync_" + (new Date()).getTime() + ".json";
-            } else {
-                ordersFileJSON = 'orders_sync.json';
+    async function fetchChannelId(cs) {
+        return await cs.byQueryString("where=key=\"" + CHANNEL_KEY + "\"").fetch().then(function (data) {
+            if (data.body.total == 0) {
+                logger.info(`no channel found for key ${CHANNEL_KEY}`);
+                throw new Error(`no channel found for key ${CHANNEL_KEY}`);
             }
-            return ordersFileJSON;
-        }
-
-        logger.info("About to sync order " + filename);
-
-        return new Promise(function (resolve, reject) {
-            if (process.env.CONFIG_CT_CREATE_SYNC_ACTIONS) {
-                try {
-                    logger.info("Creating sync actions");
-                    return createSyncOrders(getTargetFileNameWithLocation(filename)).then(async function (orders) {
-                        if (orders.length) {
-                            await writeFileToBucket(JSON.stringify(orders, null, 2), getTargetFileNameWithLocation(getJsonFileName())).then(function () {
-                                logger.info("File was written to bucket " + process.env.CONFIG_GCS_TARGET_BUCKET_NAME);
-                                return resolve();
-                            }).catch(function (e) {
-                                logger.error(e);
-                                reject(e);
-                            });
-                        } else {
-                            logger.info("No orders exported, no orders sync action to be set.");
-                        }
-                    });
-                } catch (e) {
-                    logger.error(e);
-                    reject(e);
-                }
-                resolve();
-            } else {
-                logger.info("Sync actions not created");
-            }
+            logger.info(`found chanel ${data.body.results[0].id}`);
+            return data.body.results[0].id;
+        }).catch(function (e) {
+            logger.error('error fetching');
+            logger.error(e);
+            throw e;
         });
     }
 
+    async function fetchOrder(os, orderNumber) {
+
+        return await os.byQueryString("where=orderNumber=\"" + orderNumber + "\"").fetch().then(function (data) {
+            if (data.body.total == 0) {
+                logger.info(`no order found for number ${orderNumber}`);
+                throw new Error(`no order found for number ${orderNumber}`);
+            }
+            logger.info(`found order ${data.body.results[0].id}`);
+            return data.body.results[0];
+        }).catch(function (e) {
+            logger.error('error fetching');
+            logger.error(e);
+            throw e;
+        });
+    }
+
+    async function fetchStateId(cs, stateName) {
+
+        return await cs.byQueryString("where=key=\"" + stateName + "\"").fetch().then(function (data) {
+            if (data.body.total == 0) {
+                logger.info(`no state found for key ${stateName}`);
+                throw new Error(`no state found for key ${stateName}`);
+            }
+            logger.info(`found state ${data.body.results[0].id}`);
+            return data.body.results[0].id;
+        }).catch(function (e) {
+            logger.error('error fetching');
+            throw e;
+        });
+    }
+
+    function processOrderUpdate(filename) {
+
+        return new Promise(function (resolve, reject) {
+            logger.info("About to sync order " + filename);
+            try {
+                logger.info("Processing sync information");
+                return createSyncOrders(getTargetFileNameWithLocation(filename)).then(async function (orders) {
+
+                    if (orders.length) {
+                        logger.info(`syncing ${orders.length} orders`);
+                        let os = getOrderService();
+                        const channelId = await fetchChannelId(getChannelService());
+                        const newStateId = await fetchStateId(getStatesService(), 'exported');
+
+                        for (const ord of orders) {
+                            await processOrder(os, ord, channelId, newStateId);
+                        }
+                    } else {
+                        logger.info("No orders exported, no orders sync action to be set.");
+                    }
+                });
+            } catch (e) {
+                logger.error(e);
+                reject(e);
+            }
+            resolve();
+        });
+
+        function createSyncInfoUpdateAction(ver, channelId) {
+            return {
+                version: ver,
+                actions: [
+                    {
+                        action: 'updateSyncInfo',
+                        channel: {
+                            typeId: 'channel',
+                            id: channelId
+                        }
+                    }
+                ]
+            }
+        }
+
+        function createUpdateItemsStatesUpdateAction(items, newStateId, orderVersion) {
+            let item_actions = [];
+            for (const item of items) {
+                for (const stateObj of item['state']) {
+                    let action = {
+                        action: 'transitionLineItemState',
+                        lineItemId: item['id'],
+                        quantity: stateObj['quantity'],
+                        fromState: stateObj['state'],
+                        toState: {
+                            typeId: 'state',
+                            id: newStateId
+                        }
+                    }
+                    item_actions.push(action);
+                }
+            }
+            return {
+                version: orderVersion,
+                actions: item_actions
+            }
+        }
+
+        async function updateOrder(orderId, update_action, os) {
+            logger.info(`sending order ${orderId} update ${JSON.stringify(update_action, null, 2)}`);
+            // updating order
+            await os.byId(orderId).update(update_action).then(function (result) {
+                if (result.statusCode != 200) {
+                    logger.error(result.message);
+                    throw new Error(result.message);
+                }
+                logger.info(`update of order ${orderId} complete`);
+                return result.body;
+            }).catch(function (e) {
+                logger.error(e);
+                throw e;
+            });
+        }
+
+        async function processOrder(os, ord, channelId, newStateId) {
+            try {
+                let order = await fetchOrder(os, ord.orderNumber);
+                let version = order['version'];
+                let update_action = createSyncInfoUpdateAction(version++, channelId);
+                //updating object fo current version
+                await updateOrder(order['id'], update_action, os).then(async function () {
+                    const items = order['lineItems'];
+                    update_action = createUpdateItemsStatesUpdateAction(items, newStateId, version);
+                    await updateOrder(order['id'], update_action, os);
+                });
+            } catch (e) {
+                logger.error(e);
+                throw e;
+            }
+        }
+    }
 })
 ();
 
@@ -151,8 +311,7 @@ function writeFileToBucket(data, filename) {
 
 function getBucket() {
     const storage = new Storage();
-    const bucket = storage.bucket(process.env.CONFIG_GCS_TARGET_BUCKET_NAME);
-    return bucket;
+    return storage.bucket(GCS_TARGET_BUCKET_NAME);
 }
 
 function createSyncOrders(fileName) {
@@ -167,12 +326,6 @@ function createSyncOrders(fileName) {
             if (data.orderNumber && !orderNumberMap[data.orderNumber]) {
                 order = {
                     orderNumber: data.orderNumber,
-                    syncInfo: [
-                        {
-                            externalId: fileName,
-                            channel: CHANNEL_KEY
-                        }
-                    ]
                 };
                 orders.push(order);
                 return orderNumberMap[data.orderNumber] = true;
@@ -188,16 +341,14 @@ function createSyncOrders(fileName) {
 
 function logConfiguration(logger) {
     const config = {
-        CONFIG_CT_PROJECT_KEY: process.env.CONFIG_CT_PROJECT_KEY,
-        CONFIG_CT_CLIENT_ID: process.env.CONFIG_CT_CLIENT_ID ? "(present)" : "(missing)",
-        CONFIG_CT_CLIENT_SECRET: process.env.CONFIG_CT_CLIENT_SECRET ? "(present)" : "(missing)",
-        CONFIG_CT_CREATE_SYNC_ACTIONS: process.env.CONFIG_CT_CREATE_SYNC_ACTIONS,
-        CONFIG_CT_FILE_WITH_TIMESTAMP: process.env.CONFIG_CT_FILE_WITH_TIMESTAMP,
-        CONFIG_CT_CSV_TEMPLATE: process.env.CONFIG_CT_CSV_TEMPLATE,
-        CONFIG_CT_FILL_ALL_ROWS: process.env.CONFIG_CT_FILL_ALL_ROWS,
-        CONFIG_GCS_SERVICE_ACCOUNT_FILE: process.env.CONFIG_GCS_SERVICE_ACCOUNT_FILE,
-        CONFIG_GCS_TARGET_BUCKET_NAME: process.env.CONFIG_GCS_TARGET_BUCKET_NAME,
-        CONFIG_GCS_TARGET_PATH_NAME: process.env.CONFIG_GCS_TARGET_PATH_NAME,
+        CONFIG_CT_PROJECT_KEY: CT_PROJECT_KEY,
+        CONFIG_CT_CLIENT_ID: CT_CLIENT_ID ? "(present)" : "(missing)",
+        CONFIG_CT_CLIENT_SECRET: CT_CLIENT_SECRET ? "(present)" : "(missing)",
+        CONFIG_CT_CSV_TEMPLATE: CT_CSV_TEMPLATE,
+        CONFIG_CT_FILL_ALL_ROWS: CT_FILL_ALL_ROWS,
+        CONFIG_GCS_SERVICE_ACCOUNT_FILE: GCS_SERVICE_ACCOUNT_FILE,
+        CONFIG_GCS_TARGET_BUCKET_NAME: GCS_TARGET_BUCKET_NAME,
+        CONFIG_GCS_TARGET_PATH_NAME: GCS_TARGET_PATH_NAME,
     };
     logger.info(config);
 }

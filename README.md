@@ -12,7 +12,7 @@ A dockerized nodejs app for running export of orders into google bucket. Bucket 
 | CONFIG\_CT\_CLIENT_SECRET                  | Mandatory. Commercetools client secret to authorize into project                              | --                  |
 | CONFIG\_GCS\_TARGET\_BUCKET\_NAME          | Mandatory. Name of bucket for uploading result files                                          | --                  |
 | CONFIG\_GCS\_TARGET\_PATH\_NAME            | Mandatory. Directory within the bucket for storing result files                               | --                  |
-| CONFIG\_CT\_CSV\_TEMPLATE                  | Mandatory. PATHS to CSV Template for exported files                                           | --                  |
+| CONFIG\_CT\_CSV\_TEMPLATE                  | Mandatory. Path to CSV Template for exported files                                            | /usr/src/app/templa |
+|                                            |                                                                                               |te/exported-orders-  |
+|                                            |                                                                                               |template.csv         |
 | CONFIG\_CT\_FILL\_ALL\_ROWS                | Indication if exported orders should have data in all rows (items,deliveries,etc.)            | false               |
-| CONFIG\_CT\_CREATE\_SYNC\_ACTIONS          | Indication if for export there should be a sync file generated                                | false               |
-| CONFIG\_CT\_FILE\_WITH\_TIMESTAMP          | Indication if sync generated files should contain timestamp in name                           | false               |
